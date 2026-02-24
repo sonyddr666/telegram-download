@@ -4,7 +4,7 @@ RUN apk update && apk add --no-cache alpine-sdk linux-headers git zlib-dev opens
 RUN git clone --recursive https://github.com/tdlib/telegram-bot-api.git
 RUN cd /app/telegram-bot-api && mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/app/telegram-bot-api .. && \
-    cmake --build . --target install
+    cmake --build . --parallel --target install
 
 FROM alpine:latest AS runtime
 WORKDIR /app

@@ -1,0 +1,11 @@
+services:
+  downloader:
+    build: .
+    container_name: video-downloader-bot
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./downloads:/downloads
+    environment:
+      - DOWNLOADS_DIR=/downloads
+    restart: unless-stopped

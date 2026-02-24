@@ -11,6 +11,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY bot.py .
 RUN mkdir -p /downloads
 
-EXPOSE 8000
-
 CMD ["python", "bot.py"]

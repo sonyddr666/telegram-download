@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Bot de Download de Vídeos para Telegram — yt-dlp
+Suporta arquivos até 2GB via self-hosted Bot API Server
 """
 
 import asyncio
@@ -29,8 +30,16 @@ from telegram.ext import (
 
 # Configuração
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_API_URL = os.getenv("BOT_API_URL")  # URL do self-hosted Bot API Server
 DOWNLOADS_DIR = Path(os.getenv("DOWNLOADS_DIR", "/downloads"))
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB (limite do Telegram)
+
+# Limite de arquivo: 2GB com self-hosted API, 50MB com API pública
+if BOT_API_URL:
+    MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
+    MAX_FILE_SIZE_STR = "2GB"
+else:
+    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+    MAX_FILE_SIZE_STR = "50MB"
 
 # Logging
 logging.basicConfig(
@@ -106,11 +115,7 @@ async def _download_video(job_id: str, url: str, quality: str, update: Update, c
     outdir = DOWNLOADS_DIR / job_id
     outdir.mkdir(parents=True, exist_ok=True)
     
-    last_progress_msg = ""
-    progress_msg_count = 0
-    
     def progress_hook(d: dict):
-        nonlocal last_progress_msg, progress_msg_count
         if d["status"] == "downloading":
             percent = d.get("_percent_str", "0%").strip()
             speed = d.get("_speed_str", "—").strip()
@@ -181,9 +186,9 @@ async def _download_video(job_id: str, url: str, quality: str, update: Update, c
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=job["message_id"],
-                text=f"⚠️ Arquivo muito grande para enviar pelo Telegram\n\n"
+                text=f"⚠️ Arquivo muito grande\n\n"
                      f"📹 {job['title']}\n"
-                     f"📦 Tamanho: {_format_size(file_size)} (limite: 50MB)\n\n"
+                     f"📦 Tamanho: {_format_size(file_size)} (limite: {MAX_FILE_SIZE_STR})\n\n"
                      f"Dica: Use qualidade menor ou extraia apenas o áudio.",
             )
             return
@@ -244,6 +249,7 @@ async def _download_video(job_id: str, url: str, quality: str, update: Update, c
 # ── Handlers ────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    limit_info = f"📦 *Limite:* {MAX_FILE_SIZE_STR} por arquivo" if BOT_API_URL else "📦 *Limite:* 50MB por arquivo"
     await update.message.reply_text(
         "🎬 *Bot de Download de Vídeos*\n\n"
         "Envie uma URL de vídeo para baixar.\n\n"
@@ -252,6 +258,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Facebook, Twitter/X, Twitch\n"
         "• Vimeo, Reddit, SoundCloud\n"
         "• E muitos outros!\n\n"
+        f"{limit_info}\n\n"
         "Use /help para mais informações.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -270,7 +277,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 720p — HD\n"
         "• 480p — SD (menor tamanho)\n"
         "• 🎵 MP3 — apenas áudio\n\n"
-        "⚠️ *Limite:* 50MB por arquivo\n\n"
+        "📦 *Limite:* 2GB por arquivo\n\n"
         "📋 Comandos:\n"
         "/start — Iniciar o bot\n"
         "/help — Esta mensagem\n"
@@ -421,8 +428,25 @@ def main():
     # Criar diretório de downloads
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
     
-    # Criar aplicação
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Log de configuração
+    logger.info("=" * 50)
+    logger.info("Video Downloader Telegram Bot")
+    logger.info("=" * 50)
+    
+    # Criar aplicação com self-hosted Bot API (se configurado)
+    builder = Application.builder().token(BOT_TOKEN)
+    
+    if BOT_API_URL:
+        logger.info(f"✅ Bot API Server: {BOT_API_URL}")
+        logger.info(f"✅ Limite de arquivo: {MAX_FILE_SIZE_STR}")
+        builder = builder.base_url(BOT_API_URL)
+    else:
+        logger.warning("⚠️ Usando Bot API pública (limite 50MB)")
+        logger.warning("⚠️ Configure BOT_API_URL para limite de 2GB")
+    
+    logger.info("=" * 50)
+    
+    application = builder.build()
     
     # Handlers
     application.add_handler(CommandHandler("start", start))

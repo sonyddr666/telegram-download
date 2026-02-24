@@ -1,0 +1,15 @@
+FROM alpine:latest AS build
+WORKDIR /app
+RUN apk update && apk add --no-cache alpine-sdk linux-headers git zlib-dev openssl-dev gperf cmake
+RUN git clone --recursive https://github.com/tdlib/telegram-bot-api.git
+RUN cd /app/telegram-bot-api && mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/app/telegram-bot-api .. && \
+    cmake --build . --target install
+
+FROM alpine:latest AS runtime
+WORKDIR /app
+RUN apk update && apk add --no-cache zlib openssl
+COPY --from=build /app/telegram-bot-api/bin/telegram-bot-api /app/telegram-bot-api
+EXPOSE 8081
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["/app/telegram-bot-api --api-id=$API_ID --api-hash=$API_HASH --local"]

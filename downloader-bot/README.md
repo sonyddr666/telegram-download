@@ -1,0 +1,204 @@
+# Video Downloader Telegram Bot
+
+Bot de download de vídeos para Telegram usando yt-dlp. Suporta +1000 sites incluindo YouTube, TikTok, Instagram, Facebook, Twitter/X, Twitch e muitos outros.
+
+**📦 Limite de 2GB por arquivo** via self-hosted Bot API Server.
+
+## Funcionalidades
+
+- **+1000 sites suportados** via yt-dlp
+- **Arquivos até 2GB** (self-hosted Bot API)
+- **Múltiplas qualidades**: Melhor, 1080p, 720p, 480p, MP3
+- **Interface inline** com botões para seleção de qualidade
+- **Envio automático** do arquivo baixado
+
+## Início Rápido
+
+### 1. Obter credenciais
+
+#### Bot Token (@BotFather)
+1. Abra o [@BotFather](https://t.me/BotFather) no Telegram
+2. Envie `/newbot`
+3. Siga as instruções para criar o bot
+4. Copie o **token** fornecido
+
+#### API ID e API Hash (my.telegram.org)
+1. Acesse [my.telegram.org/auth](https://my.telegram.org/auth)
+2. Entre com seu número de telefone
+3. Vá em "API development tools"
+4. Crie uma nova aplicação
+5. Copie o **api_id** e **api_hash**
+
+### 2. Configurar e Executar
+
+```bash
+# Entrar no diretório
+cd downloader-bot
+
+# Criar arquivo .env
+cp .env.example .env
+
+# Editar .env com suas credenciais
+# BOT_TOKEN=seu_token_aqui
+# API_ID=12345678
+# API_HASH=suahashaqui
+
+# Subir o bot com Docker
+docker compose up -d --build
+```
+
+### 3. Usar o Bot
+
+1. Abra seu bot no Telegram
+2. Envie `/start`
+3. Cole a URL do vídeo
+4. Selecione a qualidade desejada
+5. Aguarde o download e receba o arquivo!
+
+## Estrutura do Projeto
+
+```
+downloader-bot/
+├── .env.example              # Template de variáveis de ambiente
+├── bot.py                    # Bot do Telegram
+├── docker-compose.yml        # Orquestração dos serviços
+├── Dockerfile                # Container do bot
+├── requirements.txt          # Dependências Python
+├── telegram-bot-api/
+│   └── Dockerfile            # Self-hosted Bot API Server
+└── downloads/                # Arquivos baixados (volume)
+```
+
+## Arquitetura
+
+```
+┌─────────────────────┐     ┌─────────────────────┐
+│   Telegram Servers  │◄───►│  Bot API Server     │
+│                     │     │  (self-hosted)      │
+│                     │     │  Limite: 2GB        │
+└─────────────────────┘     └──────────┬──────────┘
+                                       │
+                                       ▼
+                            ┌─────────────────────┐
+                            │  Telegram Bot       │
+                            │  (python-telegram)  │
+                            │  + yt-dlp           │
+                            └──────────┬──────────┘
+                                       │
+                                       ▼
+                            ┌─────────────────────┐
+                            │  Downloads          │
+                            │  (/downloads)       │
+                            └─────────────────────┘
+```
+
+## Variáveis de Ambiente
+
+| Variável | Obrigatório | Descrição |
+|----------|-------------|-----------|
+| `BOT_TOKEN` | ✅ | Token do bot (do @BotFather) |
+| `API_ID` | ✅ | API ID (do my.telegram.org) |
+| `API_HASH` | ✅ | API Hash (do my.telegram.org) |
+| `DOWNLOADS_DIR` | ❌ | Diretório para arquivos (padrão: `/downloads`) |
+| `BOT_API_URL` | ❌ | URL do Bot API Server (automático no Docker) |
+
+## Comandos do Bot
+
+| Comando | Descrição |
+|---------|-----------|
+| `/start` | Iniciar o bot e ver mensagem de boas-vindas |
+| `/help` | Ver instruções de uso |
+| `/jobs` | Ver seus downloads recentes |
+
+## Qualidades Disponíveis
+
+| Opção | Descrição | Tamanho Estimado |
+|-------|-----------|------------------|
+| 🎬 Melhor | Máxima qualidade disponível | Maior |
+| 📺 1080p | Full HD (1920×1080) | Grande |
+| 📺 720p | HD (1280×720) | Médio |
+| 📺 480p | SD (854×480) | Menor |
+| 🎵 MP3 | Apenas áudio em MP3 192kbps | Menor |
+
+## Sites Suportados
+
+O yt-dlp suporta mais de 1000 sites. Principais:
+
+| Plataforma | Observações |
+|-----------|-------------|
+| YouTube | Vídeos, Shorts, lives |
+| TikTok | Vídeos públicos |
+| Instagram | Posts, Reels (conta pública) |
+| Facebook | Vídeos públicos |
+| Twitter / X | Vídeos em tweets públicos |
+| Twitch | VODs e clips |
+| Vimeo | Vídeos públicos |
+| Reddit | Vídeos hospedados |
+| SoundCloud | Áudios (use MP3) |
+
+## Executar sem Docker
+
+```bash
+# Instalar dependências
+pip install -r requirements.txt
+
+# Configurar variáveis
+export BOT_TOKEN=seu_token_aqui
+export API_ID=12345678
+export API_HASH=suahashaqui
+
+# Executar
+python bot.py
+```
+
+> ⚠️ Sem o self-hosted Bot API Server, o limite é de 50MB.
+
+## Executar Bot API Server separadamente
+
+```bash
+# Build
+cd telegram-bot-api
+docker build -t telegram-bot-api .
+
+# Run
+docker run -d \
+  -p 8081:8081 \
+  -e API_ID=12345678 \
+  -e API_HASH=suahashaqui \
+  --name telegram-bot-api \
+  telegram-bot-api
+
+# Testar
+curl http://localhost:8081/bot<TOKEN>/getMe
+```
+
+## Limitações
+
+- **Tamanho máximo**: 2GB por arquivo (com self-hosted API)
+- **Playlists**: Não suportado (apenas vídeos individuais)
+
+## Dicas
+
+- Para vídeos longos em HD, use **720p** ou **480p**
+- Para músicas e podcasts, use **🎵 MP3**
+- Se o download falhar, tente com qualidade **Melhor**
+- O primeiro build do Bot API Server demora alguns minutos
+
+## Troubleshooting
+
+### Bot não inicia
+- Verifique se `BOT_TOKEN`, `API_ID` e `API_HASH` estão configurados
+- Verifique os logs: `docker compose logs telegram-bot`
+
+### Erro no download
+- Alguns sites podem bloquear downloads
+- Tente qualidade diferente
+- Verifique se a URL é válida
+
+### Arquivo não enviado
+- Verifique se excede 2GB
+- Verifique os logs do bot
+
+## Licença
+
+MIT

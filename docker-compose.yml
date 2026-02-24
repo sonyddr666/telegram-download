@@ -1,13 +1,12 @@
 services:
-  # Self-hosted Telegram Bot API Server (limite 2GB)
+  # Self-hosted Telegram Bot API Server (limite 2GB) - IMAGEM PRÉ-COMPILADA
   telegram-bot-api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
+    image: aiogram/telegram-bot-api:latest
     container_name: telegram-bot-api
     environment:
-      - API_ID=${API_ID}
-      - API_HASH=${API_HASH}
+      TELEGRAM_API_ID: "${API_ID}"
+      TELEGRAM_API_HASH: "${API_HASH}"
+      TELEGRAM_LOCAL: "1"
     ports:
       - "8081:8081"
     volumes:

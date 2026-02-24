@@ -32,7 +32,14 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_API_URL = os.getenv("BOT_API_URL")  # URL do self-hosted Bot API Server
 DOWNLOADS_DIR = Path(os.getenv("DOWNLOADS_DIR", "/downloads"))
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB (limite com self-hosted API)
+
+# Limite de arquivo: 2GB com self-hosted API, 50MB com API pública
+if BOT_API_URL:
+    MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
+    MAX_FILE_SIZE_STR = "2GB"
+else:
+    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+    MAX_FILE_SIZE_STR = "50MB"
 
 # Logging
 logging.basicConfig(
@@ -174,14 +181,14 @@ async def _download_video(job_id: str, url: str, quality: str, update: Update, c
             "finished_at": datetime.utcnow().isoformat() + "Z",
         })
         
-        # Verificar tamanho do arquivo (2GB com self-hosted API)
+        # Verificar tamanho do arquivo
         if file_size > MAX_FILE_SIZE:
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=job["message_id"],
                 text=f"⚠️ Arquivo muito grande\n\n"
                      f"📹 {job['title']}\n"
-                     f"📦 Tamanho: {_format_size(file_size)} (limite: 2GB)\n\n"
+                     f"📦 Tamanho: {_format_size(file_size)} (limite: {MAX_FILE_SIZE_STR})\n\n"
                      f"Dica: Use qualidade menor ou extraia apenas o áudio.",
             )
             return
@@ -242,6 +249,7 @@ async def _download_video(job_id: str, url: str, quality: str, update: Update, c
 # ── Handlers ────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    limit_info = f"📦 *Limite:* {MAX_FILE_SIZE_STR} por arquivo" if BOT_API_URL else "📦 *Limite:* 50MB por arquivo"
     await update.message.reply_text(
         "🎬 *Bot de Download de Vídeos*\n\n"
         "Envie uma URL de vídeo para baixar.\n\n"
@@ -250,7 +258,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Facebook, Twitter/X, Twitch\n"
         "• Vimeo, Reddit, SoundCloud\n"
         "• E muitos outros!\n\n"
-        "📦 *Limite:* 2GB por arquivo\n\n"
+        f"{limit_info}\n\n"
         "Use /help para mais informações.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -420,14 +428,23 @@ def main():
     # Criar diretório de downloads
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
     
+    # Log de configuração
+    logger.info("=" * 50)
+    logger.info("Video Downloader Telegram Bot")
+    logger.info("=" * 50)
+    
     # Criar aplicação com self-hosted Bot API (se configurado)
     builder = Application.builder().token(BOT_TOKEN)
     
     if BOT_API_URL:
-        logger.info(f"Usando Bot API Server: {BOT_API_URL}")
+        logger.info(f"✅ Bot API Server: {BOT_API_URL}")
+        logger.info(f"✅ Limite de arquivo: {MAX_FILE_SIZE_STR}")
         builder = builder.base_url(BOT_API_URL)
     else:
-        logger.warning("Usando Bot API pública (limite 50MB). Configure BOT_API_URL para 2GB.")
+        logger.warning("⚠️ Usando Bot API pública (limite 50MB)")
+        logger.warning("⚠️ Configure BOT_API_URL para limite de 2GB")
+    
+    logger.info("=" * 50)
     
     application = builder.build()
     

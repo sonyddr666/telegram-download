@@ -43,7 +43,7 @@ cp .env.example .env
 # API_ID=12345678
 # API_HASH=suahashaqui
 
-# Subir o bot com Docker
+# Subir o bot com Docker (rebuild para atualizar)
 docker compose up -d --build
 ```
 
@@ -69,27 +69,18 @@ downloader-bot/
 └── downloads/                # Arquivos baixados (volume)
 ```
 
-## Arquitetura
+## Verificar se está funcionando
 
-```
-┌─────────────────────┐     ┌─────────────────────┐
-│   Telegram Servers  │◄───►│  Bot API Server     │
-│                     │     │  (self-hosted)      │
-│                     │     │  Limite: 2GB        │
-└─────────────────────┘     └──────────┬──────────┘
-                                       │
-                                       ▼
-                            ┌─────────────────────┐
-                            │  Telegram Bot       │
-                            │  (python-telegram)  │
-                            │  + yt-dlp           │
-                            └──────────┬──────────┘
-                                       │
-                                       ▼
-                            ┌─────────────────────┐
-                            │  Downloads          │
-                            │  (/downloads)       │
-                            └─────────────────────┘
+```bash
+# Ver logs do bot
+docker compose logs -f telegram-bot
+
+# Você deve ver:
+# ✅ Bot API Server: http://telegram-bot-api:8081/bot
+# ✅ Limite de arquivo: 2GB
+
+# Se ver isso, está usando API pública (50MB):
+# ⚠️ Usando Bot API pública (limite 50MB)
 ```
 
 ## Variáveis de Ambiente
@@ -136,6 +127,38 @@ O yt-dlp suporta mais de 1000 sites. Principais:
 | Reddit | Vídeos hospedados |
 | SoundCloud | Áudios (use MP3) |
 
+## Troubleshooting
+
+### Bot mostra limite de 50MB
+
+Isso significa que o Bot API Server não está sendo usado. Verifique:
+
+```bash
+# 1. Verificar se o container está rodando
+docker compose ps
+
+# 2. Ver logs do Bot API Server
+docker compose logs telegram-bot-api
+
+# 3. Ver logs do bot
+docker compose logs telegram-bot
+
+# 4. Reconstruir tudo
+docker compose down
+docker compose up -d --build
+```
+
+### Erro no download
+
+- Alguns sites podem bloquear downloads
+- Tente qualidade diferente
+- Verifique se a URL é válida
+
+### Arquivo não enviado
+
+- Verifique se excede 2GB
+- Verifique os logs do bot
+
 ## Executar sem Docker
 
 ```bash
@@ -152,52 +175,6 @@ python bot.py
 ```
 
 > ⚠️ Sem o self-hosted Bot API Server, o limite é de 50MB.
-
-## Executar Bot API Server separadamente
-
-```bash
-# Build
-cd telegram-bot-api
-docker build -t telegram-bot-api .
-
-# Run
-docker run -d \
-  -p 8081:8081 \
-  -e API_ID=12345678 \
-  -e API_HASH=suahashaqui \
-  --name telegram-bot-api \
-  telegram-bot-api
-
-# Testar
-curl http://localhost:8081/bot<TOKEN>/getMe
-```
-
-## Limitações
-
-- **Tamanho máximo**: 2GB por arquivo (com self-hosted API)
-- **Playlists**: Não suportado (apenas vídeos individuais)
-
-## Dicas
-
-- Para vídeos longos em HD, use **720p** ou **480p**
-- Para músicas e podcasts, use **🎵 MP3**
-- Se o download falhar, tente com qualidade **Melhor**
-- O primeiro build do Bot API Server demora alguns minutos
-
-## Troubleshooting
-
-### Bot não inicia
-- Verifique se `BOT_TOKEN`, `API_ID` e `API_HASH` estão configurados
-- Verifique os logs: `docker compose logs telegram-bot`
-
-### Erro no download
-- Alguns sites podem bloquear downloads
-- Tente qualidade diferente
-- Verifique se a URL é válida
-
-### Arquivo não enviado
-- Verifique se excede 2GB
-- Verifique os logs do bot
 
 ## Licença
 

@@ -1,11 +1,10 @@
 services:
-  downloader:
+  telegram-bot:
     build: .
-    container_name: video-downloader-bot
-    ports:
-      - "8000:8000"
+    container_name: video-downloader-telegram-bot
     volumes:
       - ./downloads:/downloads
     environment:
+      - BOT_TOKEN=${BOT_TOKEN}
       - DOWNLOADS_DIR=/downloads
     restart: unless-stopped

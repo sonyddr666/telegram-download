@@ -1,129 +1,121 @@
-# Video Downloader Bot
+# Video Downloader Telegram Bot
 
-Bot de download de vídeos com FastAPI, yt-dlp e SSE para progresso em tempo real.
+Bot de download de vídeos para Telegram usando yt-dlp. Suporta +1000 sites incluindo YouTube, TikTok, Instagram, Facebook, Twitter/X, Twitch e muitos outros.
 
 ## Funcionalidades
 
-- **+1000 sites suportados** via yt-dlp (YouTube, TikTok, Instagram, Twitter, etc.)
-- **Progresso em tempo real** via Server-Sent Events (SSE)
+- **+1000 sites suportados** via yt-dlp
 - **Múltiplas qualidades**: Melhor, 1080p, 720p, 480p, MP3
-- **Player inline** para visualização antes do download
-- **Thumbnail e título** extraídos automaticamente
-- **Docker pronto** para deploy fácil
+- **Interface inline** com botões para seleção de qualidade
+- **Envio automático** do arquivo baixado
+- **Limite de 50MB** (restrição do Telegram)
+
+## Início Rápido
+
+### 1. Criar o Bot no Telegram
+
+1. Abra o [@BotFather](https://t.me/BotFather) no Telegram
+2. Envie `/newbot`
+3. Siga as instruções para criar o bot
+4. Copie o **token** fornecido
+
+### 2. Configurar e Executar
+
+```bash
+# Clonar ou entrar no diretório
+cd downloader-bot
+
+# Criar arquivo .env com o token
+echo "BOT_TOKEN=seu_token_aqui" > .env
+
+# Subir o bot com Docker
+docker compose up -d --build
+```
+
+### 3. Usar o Bot
+
+1. Abra seu bot no Telegram
+2. Envie `/start`
+3. Cole a URL do vídeo
+4. Selecione a qualidade desejada
+5. Aguarde o download e receba o arquivo!
 
 ## Estrutura do Projeto
 
 ```
 downloader-bot/
 ├── docker-compose.yml    # Orquestração do serviço
-├── Dockerfile            # Definição do container
-├── requirements.txt      # Dependências Python
-├── main.py               # Aplicação FastAPI
-├── static/
-│   └── index.html        # Interface web
+├── Dockerfile            # Container com Python 3.12 + ffmpeg
+├── requirements.txt      # python-telegram-bot, yt-dlp
+├── bot.py                # Bot do Telegram
 └── downloads/            # Arquivos baixados (volume)
 ```
 
-## Início Rápido
+## Variáveis de Ambiente
 
-### Com Docker (Recomendado)
+| Variável | Obrigatório | Descrição |
+|----------|-------------|-----------|
+| `BOT_TOKEN` | ✅ | Token do bot (do @BotFather) |
+| `DOWNLOADS_DIR` | ❌ | Diretório para arquivos (padrão: `/downloads`) |
 
-```bash
-# Subir o bot
-docker compose up -d --build
+## Comandos do Bot
 
-# Acessar interface web
-open http://localhost:8000
-```
+| Comando | Descrição |
+|---------|-----------|
+| `/start` | Iniciar o bot e ver mensagem de boas-vindas |
+| `/help` | Ver instruções de uso |
+| `/jobs` | Ver seus downloads recentes |
 
-### Sem Docker
+## Qualidades Disponíveis
+
+| Opção | Descrição | Tamanho Estimado |
+|-------|-----------|------------------|
+| 🎬 Melhor | Máxima qualidade disponível | Maior |
+| 📺 1080p | Full HD (1920×1080) | Grande |
+| 📺 720p | HD (1280×720) | Médio |
+| 📺 480p | SD (854×480) | Menor |
+| 🎵 MP3 | Apenas áudio em MP3 192kbps | Menor |
+
+## Sites Suportados
+
+O yt-dlp suporta mais de 1000 sites. Principais:
+
+| Plataforma | Observações |
+|-----------|-------------|
+| YouTube | Vídeos, Shorts, lives |
+| TikTok | Vídeos públicos |
+| Instagram | Posts, Reels (conta pública) |
+| Facebook | Vídeos públicos |
+| Twitter / X | Vídeos em tweets públicos |
+| Twitch | VODs e clips |
+| Vimeo | Vídeos públicos |
+| Reddit | Vídeos hospedados |
+| SoundCloud | Áudios (use MP3) |
+
+## Executar sem Docker
 
 ```bash
 # Instalar dependências
 pip install -r requirements.txt
 
+# Configurar token
+export BOT_TOKEN=seu_token_aqui
+
 # Executar
-uvicorn main:app --host 0.0.0.0 --port 8000
+python bot.py
 ```
 
-## Uso via API
+## Limitações
 
-### Criar um download
+- **Tamanho máximo**: 50MB por arquivo (limite do Telegram)
+- **Vídeos maiores**: O bot avisará e sugerirá usar qualidade menor
+- **Playlists**: Não suportado (apenas vídeos individuais)
 
-```bash
-curl -X POST http://localhost:8000/api/jobs/download \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "quality": "720p"}'
-```
+## Dicas
 
-Resposta:
-```json
-{"id": "a1b2c3d4", "status": "queued"}
-```
-
-### Acompanhar progresso (SSE)
-
-```bash
-curl -N http://localhost:8000/api/jobs/a1b2c3d4/stream
-```
-
-### Listar todos os jobs
-
-```bash
-curl http://localhost:8000/api/jobs
-```
-
-### Obter detalhes de um job
-
-```bash
-curl http://localhost:8000/api/jobs/a1b2c3d4
-```
-
-### Baixar o arquivo
-
-```bash
-curl http://localhost:8000/api/jobs/a1b2c3d4/download-file -o video.mp4
-```
-
-## Endpoints da API
-
-| Método | Path | Descrição |
-|--------|------|-----------|
-| POST | `/api/jobs/download` | Criar novo job de download |
-| GET | `/api/jobs` | Listar todos os jobs |
-| GET | `/api/jobs/{jid}` | Obter detalhes de um job |
-| GET | `/api/jobs/{jid}/stream` | SSE com progresso em tempo real |
-| GET | `/api/jobs/{jid}/download-file` | Baixar arquivo concluído |
-
-## Qualidades Disponíveis
-
-| Opção | Descrição |
-|-------|-----------|
-| `best` | Melhor qualidade disponível (padrão) |
-| `1080p` | Máximo 1080p |
-| `720p` | Máximo 720p |
-| `480p` | Máximo 480p |
-| `audio` | Apenas áudio em MP3 |
-
-## Estados do Job
-
-| Status | Descrição |
-|--------|-----------|
-| `queued` | Job na fila, aguardando início |
-| `running` | Download em andamento |
-| `done` | Download concluído com sucesso |
-| `error` | Erro durante o download |
-
-## Variáveis de Ambiente
-
-| Variável | Padrão | Descrição |
-|----------|--------|-----------|
-| `DOWNLOADS_DIR` | `/downloads` | Diretório para salvar arquivos |
-
-## Requisitos
-
-- Docker e Docker Compose
-- Ou Python 3.12+ com ffmpeg instalado
+- Para vídeos longos, use **480p** ou **MP3** para ficar dentro do limite
+- Para músicas e podcasts, use **🎵 MP3**
+- Se o download falhar, tente com qualidade **Melhor**
 
 ## Licença
 

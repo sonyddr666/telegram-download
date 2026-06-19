@@ -30,6 +30,24 @@ services:
       - telegram-bot-api
     restart: unless-stopped
 
+  web-downloader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    command: ["gunicorn", "--bind", "0.0.0.0:7776", "--workers", "1", "--threads", "4", "--timeout", "0", "web_app:app"]
+    environment:
+      WEB_PORT: "7776"
+      WEB_DOWNLOADS_DIR: "/downloads/web"
+      WEB_MAX_CONCURRENT_DOWNLOADS: "${WEB_MAX_CONCURRENT_DOWNLOADS:-1}"
+      WEB_MAX_FILE_SIZE: "${WEB_MAX_FILE_SIZE:-2147483648}"
+      WEB_JOB_TTL_SECONDS: "${WEB_JOB_TTL_SECONDS:-3600}"
+    ports:
+      - "7776:7776"
+    volumes:
+      - downloads-data:/downloads
+    restart: unless-stopped
+
 volumes:
   telegram-api-data:
   downloads-data:

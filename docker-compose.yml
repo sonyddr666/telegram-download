@@ -16,6 +16,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      network: host
     environment:
       BOT_TOKEN: "${BOT_TOKEN:?Defina BOT_TOKEN no Coolify}"
       ALLOWED_USER_ID: "${ALLOWED_USER_ID:-5619062865}"

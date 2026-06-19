@@ -1,24 +1,17 @@
 #!/usr/bin/env python3
-"""
-Bot de Download de Vídeos para Telegram — yt-dlp
-Suporta arquivos até 2GB via self-hosted Bot API Server
-"""
-
 import asyncio
+import ipaddress
 import logging
 import os
-import re
+import shutil
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yt_dlp
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
-)
-from telegram.constants import ChatAction, ParseMode
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -28,41 +21,85 @@ from telegram.ext import (
     filters,
 )
 
-# Configuração
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-BOT_API_URL = os.getenv("BOT_API_URL")  # URL do self-hosted Bot API Server
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_API_URL = os.getenv("BOT_API_URL", "").strip()
 DOWNLOADS_DIR = Path(os.getenv("DOWNLOADS_DIR", "/downloads"))
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0") or "0")
+MAX_CONCURRENT_DOWNLOADS = max(
+    1, int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "1") or "1")
+)
+DELETE_AFTER_SEND = os.getenv(
+    "DELETE_AFTER_SEND", "true"
+).strip().lower() in {"1", "true", "yes", "sim", "on"}
 
-# Limite de arquivo: 2GB com self-hosted API, 50MB com API pública
-if BOT_API_URL:
-    MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
-    MAX_FILE_SIZE_STR = "2GB"
-else:
-    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
-    MAX_FILE_SIZE_STR = "50MB"
+MAX_FILE_SIZE = 2_000_000_000 if BOT_API_URL else 50 * 1024 * 1024
+MAX_FILE_SIZE_STR = "2 GB" if BOT_API_URL else "50 MB"
 
-# Logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# Armazenamento de jobs
-_jobs: dict[str, dict] = {}
-_user_jobs: dict[int, list[str]] = {}  # user_id -> [job_ids]
+jobs: dict[str, dict] = {}
+user_jobs: dict[int, list[str]] = {}
+download_limit = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
 
-def _build_ydl_opts(quality: str, outdir: Path, progress_hook=None) -> dict:
-    tmpl = str(outdir / "video.%(ext)s")
+def allowed(update: Update) -> bool:
+    return (
+        ALLOWED_USER_ID == 0
+        or (
+            update.effective_user is not None
+            and update.effective_user.id == ALLOWED_USER_ID
+        )
+    )
+
+
+async def deny(update: Update) -> None:
+    if update.callback_query:
+        await update.callback_query.answer("Este bot é privado.", show_alert=True)
+    elif update.effective_message:
+        await update.effective_message.reply_text("⛔ Este bot é privado.")
+
+
+def safe_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+
+        host = parsed.hostname.lower()
+        if host == "localhost" or host.endswith(".local"):
+            return False
+
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return True
+
+        return not any(
+            (
+                address.is_private,
+                address.is_loopback,
+                address.is_link_local,
+                address.is_multicast,
+                address.is_reserved,
+                address.is_unspecified,
+            )
+        )
+    except ValueError:
+        return False
+
+
+def ydl_options(quality: str, directory: Path) -> dict:
     common = {
-        "outtmpl": tmpl,
+        "outtmpl": str(directory / "video.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        "restrictfilenames": True,
     }
-    if progress_hook:
-        common["progress_hooks"] = [progress_hook]
 
     if quality == "audio":
         return {
@@ -77,387 +114,407 @@ def _build_ydl_opts(quality: str, outdir: Path, progress_hook=None) -> dict:
             ],
         }
 
-    fmt_map = {
-        "1080p": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best",
-        "720p": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best",
-        "480p": "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]/best",
-        "best": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+    formats = {
+        "best": (
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo+bestaudio/best"
+        ),
+        "1080p": (
+            "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+            "best[height<=1080]/best"
+        ),
+        "720p": (
+            "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/"
+            "best[height<=720]/best"
+        ),
+        "480p": (
+            "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/"
+            "best[height<=480]/best"
+        ),
     }
+
     return {
         **common,
-        "format": fmt_map.get(quality, fmt_map["best"]),
+        "format": formats.get(quality, formats["best"]),
         "merge_output_format": "mp4",
     }
 
 
-def _format_size(size_bytes: int) -> str:
-    if size_bytes < 1024:
-        return f"{size_bytes}B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f}KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / 1024 / 1024:.1f}MB"
-    return f"{size_bytes / 1024 / 1024 / 1024:.1f}GB"
+def size_text(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024**2:
+        return f"{size / 1024:.1f} KB"
+    if size < 1024**3:
+        return f"{size / 1024**2:.1f} MB"
+    return f"{size / 1024**3:.1f} GB"
 
 
-def _format_duration(seconds: int) -> str:
-    if seconds < 60:
-        return f"{seconds}s"
-    elif seconds < 3600:
-        return f"{seconds // 60}m {seconds % 60}s"
-    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+async def download(
+    job_id: str,
+    quality: str,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    job = jobs[job_id]
+    directory = DOWNLOADS_DIR / job_id
+    directory.mkdir(parents=True, exist_ok=True)
 
-
-async def _download_video(job_id: str, url: str, quality: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    job = _jobs[job_id]
-    job["status"] = "downloading"
-    
-    outdir = DOWNLOADS_DIR / job_id
-    outdir.mkdir(parents=True, exist_ok=True)
-    
-    def progress_hook(d: dict):
-        if d["status"] == "downloading":
-            percent = d.get("_percent_str", "0%").strip()
-            speed = d.get("_speed_str", "—").strip()
-            eta = d.get("_eta_str", "—").strip()
-            job["progress"] = {"percent": percent, "speed": speed, "eta": eta}
-        elif d["status"] == "finished":
-            job["progress"]["percent"] = "100%"
-    
     try:
-        # Primeiro, obter informações do vídeo
-        opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
-        
-        def get_info():
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(url, download=False)
-        
-        loop = asyncio.get_event_loop()
-        info = await loop.run_in_executor(None, get_info)
-        
-        job["title"] = info.get("title", "Sem título")
-        job["thumbnail"] = info.get("thumbnail", "")
-        job["duration"] = info.get("duration", 0)
-        job["uploader"] = info.get("uploader", "")
-        
-        # Atualizar mensagem com info do vídeo
-        duration_str = _format_duration(job["duration"]) if job["duration"] else "—"
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=job["message_id"],
-            text=f"📥 Baixando: {job['title']}\n"
-                 f"⏱ Duração: {duration_str}\n"
-                 f"📊 Qualidade: {quality}\n"
-                 f"⏳ Iniciando download...",
-        )
-        
-        # Download
-        opts = _build_ydl_opts(quality, outdir, progress_hook)
-        
-        def do_download():
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
-        
-        await loop.run_in_executor(None, do_download)
-        
-        # Encontrar arquivo baixado
-        files = sorted(
-            outdir.glob("video.*"),
-            key=lambda f: f.stat().st_size,
-            reverse=True,
-        )
-        
-        if not files:
-            raise RuntimeError("Nenhum arquivo gerado após o download")
-        
-        vf = files[0]
-        file_size = vf.stat().st_size
-        
-        job.update({
-            "status": "done",
-            "file": str(vf),
-            "filename": vf.name,
-            "filesize": file_size,
-            "finished_at": datetime.utcnow().isoformat() + "Z",
-        })
-        
-        # Verificar tamanho do arquivo
-        if file_size > MAX_FILE_SIZE:
+        async with download_limit:
+            job["status"] = "downloading"
+            loop = asyncio.get_running_loop()
+
+            def fetch_info():
+                with yt_dlp.YoutubeDL(
+                    {"quiet": True, "no_warnings": True, "noplaylist": True}
+                ) as ydl:
+                    return ydl.extract_info(job["url"], download=False)
+
+            info = await loop.run_in_executor(None, fetch_info)
+            job["title"] = info.get("title") or "Sem título"
+            job["uploader"] = info.get("uploader") or ""
+
             await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
+                chat_id=job["chat_id"],
                 message_id=job["message_id"],
-                text=f"⚠️ Arquivo muito grande\n\n"
-                     f"📹 {job['title']}\n"
-                     f"📦 Tamanho: {_format_size(file_size)} (limite: {MAX_FILE_SIZE_STR})\n\n"
-                     f"Dica: Use qualidade menor ou extraia apenas o áudio.",
+                text=(
+                    f"📥 Baixando: {job['title']}\n"
+                    f"📊 Qualidade: {quality}\n"
+                    "⏳ Aguarde..."
+                ),
             )
-            return
-        
-        # Enviar arquivo
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=job["message_id"],
-            text=f"✅ Download concluído!\n\n"
-                 f"📹 {job['title']}\n"
-                 f"📦 Tamanho: {_format_size(file_size)}\n"
-                 f"⏳ Enviando arquivo...",
-        )
-        
-        is_audio = vf.suffix == ".mp3"
-        
-        if is_audio:
-            await context.bot.send_audio(
-                chat_id=update.effective_chat.id,
-                audio=vf.open("rb"),
-                filename=job["filename"],
-                title=job["title"],
-                performer=job.get("uploader", ""),
-                caption=f"🎵 {job['title']}",
+
+            def run_download():
+                with yt_dlp.YoutubeDL(
+                    ydl_options(quality, directory)
+                ) as ydl:
+                    ydl.download([job["url"]])
+
+            await loop.run_in_executor(None, run_download)
+
+            files = sorted(
+                directory.glob("video.*"),
+                key=lambda file: file.stat().st_size,
+                reverse=True,
             )
-        else:
-            await context.bot.send_video(
-                chat_id=update.effective_chat.id,
-                video=vf.open("rb"),
-                filename=job["filename"],
-                caption=f"📹 {job['title']}\n📦 {_format_size(file_size)}",
-                supports_streaming=True,
+            if not files:
+                raise RuntimeError("O yt-dlp não gerou nenhum arquivo")
+
+            media = files[0]
+            media_size = media.stat().st_size
+
+            if media_size > MAX_FILE_SIZE:
+                raise RuntimeError(
+                    f"arquivo com {size_text(media_size)} excede "
+                    f"o limite de {MAX_FILE_SIZE_STR}"
+                )
+
+            await context.bot.edit_message_text(
+                chat_id=job["chat_id"],
+                message_id=job["message_id"],
+                text=(
+                    "✅ Download concluído\n\n"
+                    f"📹 {job['title']}\n"
+                    f"📦 {size_text(media_size)}\n"
+                    "⏳ Enviando..."
+                ),
             )
-        
-        await context.bot.delete_message(
-            chat_id=update.effective_chat.id,
-            message_id=job["message_id"],
+
+            upload = str(media) if BOT_API_URL else media.open("rb")
+            try:
+                options = {
+                    "chat_id": job["chat_id"],
+                    "filename": media.name,
+                    "caption": f"📹 {job['title']}\n📦 {size_text(media_size)}",
+                    "read_timeout": None,
+                    "write_timeout": None,
+                    "connect_timeout": 60,
+                    "pool_timeout": 60,
+                }
+
+                if media.suffix.lower() == ".mp3":
+                    await context.bot.send_audio(
+                        audio=upload,
+                        title=job["title"],
+                        performer=job["uploader"],
+                        **options,
+                    )
+                else:
+                    await context.bot.send_video(
+                        video=upload,
+                        supports_streaming=True,
+                        **options,
+                    )
+            finally:
+                if hasattr(upload, "close"):
+                    upload.close()
+
+            job.update(
+                status="done",
+                filesize=media_size,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+            await context.bot.delete_message(
+                chat_id=job["chat_id"],
+                message_id=job["message_id"],
+            )
+
+    except Exception as error:
+        job.update(
+            status="error",
+            error=str(error),
+            finished_at=datetime.now(timezone.utc).isoformat(),
         )
-        
-    except Exception as exc:
-        job.update({
-            "status": "error",
-            "error": str(exc),
-            "finished_at": datetime.utcnow().isoformat() + "Z",
-        })
-        
-        logger.error(f"Erro no download {job_id}: {exc}")
-        
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=job["message_id"],
-            text=f"❌ Erro no download\n\n"
-                 f"URL: {url}\n"
-                 f"Erro: {str(exc)[:200]}",
-        )
+        logger.exception("Falha no download %s", job_id)
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=job["chat_id"],
+                message_id=job["message_id"],
+                text=f"❌ Erro no download\n\n{str(error)[:300]}",
+            )
+        except Exception:
+            logger.exception("Falha ao enviar a mensagem de erro")
+    finally:
+        if DELETE_AFTER_SEND:
+            shutil.rmtree(directory, ignore_errors=True)
 
 
-# ── Handlers ────────────────────────────────────────────────────────────────
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not allowed(update):
+        await deny(update)
+        return
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    limit_info = f"📦 *Limite:* {MAX_FILE_SIZE_STR} por arquivo" if BOT_API_URL else "📦 *Limite:* 50MB por arquivo"
-    await update.message.reply_text(
-        "🎬 *Bot de Download de Vídeos*\n\n"
-        "Envie uma URL de vídeo para baixar.\n\n"
-        "✅ Suporta +1000 sites:\n"
-        "• YouTube, TikTok, Instagram\n"
-        "• Facebook, Twitter/X, Twitch\n"
-        "• Vimeo, Reddit, SoundCloud\n"
-        "• E muitos outros!\n\n"
-        f"{limit_info}\n\n"
-        "Use /help para mais informações.",
-        parse_mode=ParseMode.MARKDOWN,
+    await update.effective_message.reply_text(
+        "🎬 <b>Bot de Download de Vídeos</b>\n\n"
+        "Envie uma URL e escolha a qualidade.\n"
+        f"Limite por arquivo: <b>{MAX_FILE_SIZE_STR}</b>.",
+        parse_mode=ParseMode.HTML,
     )
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📚 *Como usar*\n\n"
-        "1️⃣ Envie a URL do vídeo\n"
-        "2️⃣ Escolha a qualidade desejada\n"
-        "3️⃣ Aguarde o download\n"
-        "4️⃣ Receba o arquivo!\n\n"
-        "🎯 *Qualidades disponíveis:*\n"
-        "• Melhor — máxima qualidade\n"
-        "• 1080p — Full HD\n"
-        "• 720p — HD\n"
-        "• 480p — SD (menor tamanho)\n"
-        "• 🎵 MP3 — apenas áudio\n\n"
-        "📦 *Limite:* 2GB por arquivo\n\n"
-        "📋 Comandos:\n"
-        "/start — Iniciar o bot\n"
-        "/help — Esta mensagem\n"
-        "/jobs — Ver seus downloads",
-        parse_mode=ParseMode.MARKDOWN,
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not allowed(update):
+        await deny(update)
+        return
+
+    await update.effective_message.reply_text(
+        "📚 <b>Como usar</b>\n\n"
+        "1. Envie uma URL.\n"
+        "2. Escolha melhor, 1080p, 720p, 480p ou MP3.\n"
+        "3. Aguarde o envio.\n\n"
+        "/start - iniciar\n"
+        "/help - ajuda\n"
+        "/jobs - downloads recentes",
+        parse_mode=ParseMode.HTML,
     )
 
 
-async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
-    
-    # Validação básica de URL
-    url_pattern = re.compile(
-        r'^https?://'  # http:// ou https://
-        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  # domínio
-        r'localhost|'  # localhost
-        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # IP
-        r'(?::\d+)?'  # porta opcional
-        r'(?:/?|[/?]\S+)$', re.IGNORECASE)
-    
-    if not url_pattern.match(url):
-        await update.message.reply_text(
-            "⚠️ Por favor, envie uma URL válida.",
+async def receive_url(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not allowed(update):
+        await deny(update)
+        return
+
+    message = update.effective_message
+    if not message or not message.text:
+        return
+
+    url = message.text.strip()
+    if not safe_url(url):
+        await message.reply_text(
+            "⚠️ Envie uma URL pública HTTP ou HTTPS válida."
         )
         return
-    
-    # Criar job
-    jid = uuid.uuid4().hex[:8]
-    
-    keyboard = [
+
+    job_id = uuid.uuid4().hex[:8]
+    keyboard = InlineKeyboardMarkup(
         [
-            InlineKeyboardButton("🎬 Melhor", callback_data=f"dl:{jid}:best"),
-            InlineKeyboardButton("📺 1080p", callback_data=f"dl:{jid}:1080p"),
-        ],
-        [
-            InlineKeyboardButton("📺 720p", callback_data=f"dl:{jid}:720p"),
-            InlineKeyboardButton("📺 480p", callback_data=f"dl:{jid}:480p"),
-        ],
-        [
-            InlineKeyboardButton("🎵 MP3 (Áudio)", callback_data=f"dl:{jid}:audio"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    message = await update.message.reply_text(
-        "🎬 *Novo Download*\n\n"
-        f"URL: {url}\n\n"
-        "Selecione a qualidade:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=reply_markup,
+            [
+                InlineKeyboardButton(
+                    "🎬 Melhor", callback_data=f"dl:{job_id}:best"
+                ),
+                InlineKeyboardButton(
+                    "📺 1080p", callback_data=f"dl:{job_id}:1080p"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📺 720p", callback_data=f"dl:{job_id}:720p"
+                ),
+                InlineKeyboardButton(
+                    "📺 480p", callback_data=f"dl:{job_id}:480p"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎵 MP3", callback_data=f"dl:{job_id}:audio"
+                )
+            ],
+        ]
     )
-    
-    _jobs[jid] = {
-        "id": jid,
+
+    reply = await message.reply_text(
+        f"🎬 Novo download\n\nURL: {url}\n\nSelecione a qualidade:",
+        reply_markup=keyboard,
+    )
+
+    user_id = update.effective_user.id
+    jobs[job_id] = {
         "url": url,
-        "user_id": update.effective_user.id,
+        "user_id": user_id,
         "chat_id": update.effective_chat.id,
-        "message_id": message.message_id,
+        "message_id": reply.message_id,
         "status": "waiting",
-        "quality": None,
-        "progress": {"percent": "0%", "speed": "—", "eta": "—"},
         "title": "",
-        "thumbnail": "",
-        "duration": 0,
         "uploader": "",
-        "file": None,
-        "filename": None,
         "filesize": None,
         "error": None,
-        "created_at": datetime.utcnow().isoformat() + "Z",
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    
-    # Registrar job no usuário
-    user_id = update.effective_user.id
-    if user_id not in _user_jobs:
-        _user_jobs[user_id] = []
-    _user_jobs[user_id].append(jid)
+
+    recent = user_jobs.setdefault(user_id, [])
+    recent.append(job_id)
+    del recent[:-20]
 
 
-async def quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def choose_quality(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
     query = update.callback_query
+    if not query:
+        return
+
+    if not allowed(update):
+        await deny(update)
+        return
+
+    try:
+        _, job_id, quality = (query.data or "").split(":", 2)
+    except ValueError:
+        await query.answer("Ação inválida.", show_alert=True)
+        return
+
+    job = jobs.get(job_id)
+    if not job:
+        await query.answer("Download expirado.", show_alert=True)
+        return
+    if query.from_user.id != job["user_id"]:
+        await query.answer("Este download não é seu.", show_alert=True)
+        return
+    if job["status"] != "waiting":
+        await query.answer("Este download já foi iniciado.", show_alert=True)
+        return
+
     await query.answer()
-    
-    data = query.data
-    if not data.startswith("dl:"):
-        return
-    
-    _, jid, quality = data.split(":")
-    
-    if jid not in _jobs:
-        await query.edit_message_text("❌ Job não encontrado. Inicie novamente.")
-        return
-    
-    job = _jobs[jid]
-    job["quality"] = quality
     job["status"] = "queued"
-    
+
     await query.edit_message_text(
-        f"📥 *Download iniciado*\n\n"
+        "📥 Download colocado na fila\n\n"
         f"URL: {job['url']}\n"
         f"Qualidade: {quality}\n\n"
-        f"⏳ Aguarde...",
-        parse_mode=ParseMode.MARKDOWN,
+        "⏳ Aguarde..."
     )
-    
-    # Iniciar download em background
-    asyncio.create_task(_download_video(jid, job["url"], quality, update, context))
+    asyncio.create_task(download(job_id, quality, context))
 
 
-async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if user_id not in _user_jobs or not _user_jobs[user_id]:
-        await update.message.reply_text(
-            "📋 Você não tem downloads recentes.",
+async def jobs_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not allowed(update):
+        await deny(update)
+        return
+
+    ids = user_jobs.get(update.effective_user.id, [])
+    if not ids:
+        await update.effective_message.reply_text(
+            "📋 Nenhum download recente."
         )
         return
-    
-    lines = ["📋 *Seus Downloads*\n"]
-    
-    for jid in _user_jobs[user_id][-10:]:  # Últimos 10
-        job = _jobs.get(jid)
-        if not job:
-            continue
-        
-        status_emoji = {
-            "waiting": "⏳",
-            "queued": "📋",
-            "downloading": "📥",
-            "done": "✅",
-            "error": "❌",
-        }.get(job["status"], "❓")
-        
-        title = job.get("title", job["url"])[:40]
-        lines.append(f"{status_emoji} `{jid}` — {title}")
-    
-    await update.message.reply_text(
-        "\n".join(lines),
-        parse_mode=ParseMode.MARKDOWN,
+
+    icons = {
+        "waiting": "⏳",
+        "queued": "📋",
+        "downloading": "📥",
+        "done": "✅",
+        "error": "❌",
+    }
+    lines = ["📋 Downloads recentes\n"]
+
+    for job_id in ids[-10:]:
+        job = jobs.get(job_id)
+        if job:
+            title = (job.get("title") or job["url"])[:50]
+            lines.append(
+                f"{icons.get(job['status'], '❓')} {job_id} - {title}"
+            )
+
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    error = context.error
+    logger.error(
+        "Erro não tratado",
+        exc_info=(type(error), error, error.__traceback__) if error else None,
     )
 
 
-def main():
+def main() -> None:
     if not BOT_TOKEN:
-        logger.error("BOT_TOKEN não definido! Use: export BOT_TOKEN=seu_token")
-        return
-    
-    # Criar diretório de downloads
+        raise RuntimeError("BOT_TOKEN não foi definido")
+
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    
-    # Log de configuração
-    logger.info("=" * 50)
-    logger.info("Video Downloader Telegram Bot")
-    logger.info("=" * 50)
-    
-    # Criar aplicação com self-hosted Bot API (se configurado)
     builder = Application.builder().token(BOT_TOKEN)
-    
+
     if BOT_API_URL:
-        logger.info(f"✅ Bot API Server: {BOT_API_URL}")
-        logger.info(f"✅ Limite de arquivo: {MAX_FILE_SIZE_STR}")
-        builder = builder.base_url(BOT_API_URL)
-    else:
-        logger.warning("⚠️ Usando Bot API pública (limite 50MB)")
-        logger.warning("⚠️ Configure BOT_API_URL para limite de 2GB")
-    
-    logger.info("=" * 50)
-    
+        root = BOT_API_URL.removesuffix("/bot")
+        builder = (
+            builder.base_url(BOT_API_URL)
+            .base_file_url(f"{root}/file/bot")
+            .local_mode(True)
+            .media_write_timeout(None)
+            .read_timeout(None)
+            .write_timeout(None)
+            .connect_timeout(60)
+            .pool_timeout(60)
+        )
+
     application = builder.build()
-    
-    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("jobs", jobs_command))
-    application.add_handler(CallbackQueryHandler(quality_callback, pattern=r"^dl:"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
-    
-    # Iniciar bot
-    logger.info("Bot iniciado!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.add_handler(
+        CallbackQueryHandler(choose_quality, pattern=r"^dl:")
+    )
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url)
+    )
+    application.add_error_handler(error_handler)
+
+    logger.info(
+        "Bot iniciado | usuário=%s | limite=%s | simultâneos=%s",
+        ALLOWED_USER_ID or "todos",
+        MAX_FILE_SIZE_STR,
+        MAX_CONCURRENT_DOWNLOADS,
+    )
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":

@@ -23,11 +23,15 @@ RUN python -m pip install \
     --index-url https://pypi.org/simple \
     -r requirements.txt
 
-COPY bot.py .
+COPY bot.py web_app.py web_page.py ./
 
-RUN mkdir -p /downloads \
+RUN mkdir -p /downloads /app/templates \
+    && python -c "from pathlib import Path; from web_page import PAGE_HTML; Path('/app/templates/index.html').write_text(PAGE_HTML, encoding='utf-8')" \
+    && python -m py_compile bot.py web_app.py web_page.py \
     && ffmpeg -version \
     && ffprobe -version \
     && deno --version
+
+EXPOSE 7776
 
 CMD ["python", "-u", "bot.py"]
